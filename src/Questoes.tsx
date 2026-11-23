@@ -370,22 +370,48 @@ export const ROTEIRO_ETAPAS: EtapaRoteiro[] = [
     },
 ];
 
-export function sortearQuestoesPartida(): Questao[] {
-    const embaralhar = (lista: Questao[]) => {
-        const copia = [...lista];
-        for (let i = copia.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [copia[i], copia[j]] = [copia[j], copia[i]];
-        }
-        return copia;
+function indiceAleatorio(maxExclusivo: number): number {
+    if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+        const array = new Uint32Array(1);
+        window.crypto.getRandomValues(array);
+        return array[0] % maxExclusivo;
+    }
+    return Math.floor(Math.random() * maxExclusivo);
+}
+
+function embaralharLista<T>(lista: T[]): T[] {
+    const copia = [...lista];
+    for (let i = copia.length - 1; i > 0; i--) {
+        const j = indiceAleatorio(i + 1);
+        [copia[i], copia[j]] = [copia[j], copia[i]];
+    }
+    return copia;
+}
+
+export function embaralharAlternativasQuestao(questao: Questao): Questao {
+    const alternativasIndexadas = questao.alternativas.map((texto, indiceOriginal) => ({
+        texto,
+        ehCorreta: indiceOriginal === questao.correta,
+    }));
+
+    const embaralhadas = embaralharLista(alternativasIndexadas);
+    const novoIndiceCorreta = embaralhadas.findIndex((item) => item.ehCorreta);
+
+    return {
+        ...questao,
+        alternativas: embaralhadas.map((item) => item.texto),
+        correta: novoIndiceCorreta >= 0 ? novoIndiceCorreta : 0,
     };
+}
 
-    const b1 = embaralhar(BANCO_QUESTOES.filter((q) => q.bloco === 1)).slice(0, 3);
-    const b2 = embaralhar(BANCO_QUESTOES.filter((q) => q.bloco === 2)).slice(0, 3);
-    const b3 = embaralhar(BANCO_QUESTOES.filter((q) => q.bloco === 3)).slice(0, 3);
-    const b4 = embaralhar(BANCO_QUESTOES.filter((q) => q.bloco === 4)).slice(0, 1);
+export function sortearQuestoesPartida(): Questao[] {
+    const b1 = embaralharLista(BANCO_QUESTOES.filter((q) => q.bloco === 1)).slice(0, 3);
+    const b2 = embaralharLista(BANCO_QUESTOES.filter((q) => q.bloco === 2)).slice(0, 3);
+    const b3 = embaralharLista(BANCO_QUESTOES.filter((q) => q.bloco === 3)).slice(0, 3);
+    const b4 = embaralharLista(BANCO_QUESTOES.filter((q) => q.bloco === 4)).slice(0, 1);
 
-    return [...b1, ...b2, ...b3, ...b4];
+    const questoesEmbaralhadas = embaralharLista([...b1, ...b2, ...b3, ...b4]);
+    return questoesEmbaralhadas.map(embaralharAlternativasQuestao);
 }
 
 interface QuestoesProps {
@@ -451,7 +477,7 @@ export default function Questoes({ questoesPartida, indiceEtapa, estadoJogo, som
         const pool = doMesmoBloco.length > 0 ? doMesmoBloco : qualquerSimples;
         if (pool.length === 0) return null;
 
-        return pool[Math.floor(Math.random() * pool.length)];
+        return pool[indiceAleatorio(pool.length)];
     }, []);
 
     const acionarTrocaPorPerdaDeFoco = useCallback(() => {
@@ -470,11 +496,13 @@ export default function Questoes({ questoesPartida, indiceEtapa, estadoJogo, som
             proximaQuestao = sortearQuestaoExtra(questaoAtual.bloco, idsUsadosNaPartidaRef.current);
         }
 
+        const questaoComAlternativasEmbaralhadas = embaralharAlternativasQuestao(proximaQuestao);
+
         trocasNaEtapaRef.current += 1;
-        idsUsadosNaPartidaRef.current.add(proximaQuestao.id);
+        idsUsadosNaPartidaRef.current.add(questaoComAlternativasEmbaralhadas.id);
         setAlternativaSelecionada(null);
-        setQuestaoSobrescrita({ etapa: indiceEtapa, questao: proximaQuestao });
-        onSubstituirQuestao?.(indiceEtapa, proximaQuestao);
+        setQuestaoSobrescrita({ etapa: indiceEtapa, questao: questaoComAlternativasEmbaralhadas });
+        onSubstituirQuestao?.(indiceEtapa, questaoComAlternativasEmbaralhadas);
     }, [indiceEtapa, modoDev, onSubstituirQuestao, questaoAtual, questaoRespondida, sortearQuestaoSimplesDisponivel]);
 
     // Monitora troca de aba, minimizacao ou perda de foco silenciosamente
