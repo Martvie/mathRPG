@@ -323,6 +323,10 @@ export default function App() {
         setTelaAtual("QUIZ");
     }
 
+    function substituirQuestaoPartida(indice: number, novaQuestao: Questao) {
+        setQuestoesPartida((prev) => prev.map((q, idx) => (idx === indice ? novaQuestao : q)));
+    }
+
     function registrarRespostaEtapa(acertou: boolean, etapaInfo: EtapaRoteiro, questao: Questao) {
         setHistoricoRespostas((prev) => {
             const jaRegistrada = prev.some((r) => r.etapa === etapaInfo.etapa);
@@ -828,6 +832,7 @@ export default function App() {
                         modoDev={configDev.ativo}
                         onResponderEtapa={registrarRespostaEtapa}
                         onAvancarEtapa={avancarEtapaQuiz}
+                        onSubstituirQuestao={substituirQuestaoPartida}
                         onPularParaArena={() => {
                             prepararEstadoCompletoParaArena();
                             setTelaAtual("TRANSICAO_ARENA");

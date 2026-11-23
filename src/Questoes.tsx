@@ -1,5 +1,6 @@
 import { BookOpen, Calculator, CheckCircle2, ChevronRight, Compass, XCircle, Zap } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { sortearQuestaoExtra } from "./Extras";
 import { CenarioPixelArt, HeroSprite, HypatiaSprite, MolduraDnD } from "./Graficos";
 import { tocarEfeitoSonoro } from "./Servicos";
 import { EstadoJogo, EtapaRoteiro, Questao } from "./Tipos";
@@ -396,21 +397,40 @@ interface QuestoesProps {
     onResponderEtapa: (acertou: boolean, etapaInfo: EtapaRoteiro, questao: Questao) => void;
     onAvancarEtapa: () => void;
     onPularParaArena?: () => void;
+    onSubstituirQuestao?: (indice: number, novaQuestao: Questao) => void;
 }
 
-export default function Questoes({ questoesPartida, indiceEtapa, estadoJogo, somAtivo, modoDev = false, onResponderEtapa, onAvancarEtapa, onPularParaArena }: QuestoesProps) {
+export default function Questoes({ questoesPartida, indiceEtapa, estadoJogo, somAtivo, modoDev = false, onResponderEtapa, onAvancarEtapa, onPularParaArena, onSubstituirQuestao }: QuestoesProps) {
     const [alternativaSelecionada, setAlternativaSelecionada] = useState<number | null>(null);
     const [questaoRespondida, setQuestaoRespondida] = useState(false);
     const [mostrarRascunho, setMostrarRascunho] = useState(false);
     const [textoRascunho, setTextoRascunho] = useState("");
-    const etapasRegistradasRef = useRef<Set<number>>(new Set());
+    const [questaoSobrescrita, setQuestaoSobrescrita] = useState<{ etapa: number; questao: Questao } | null>(null);
 
-    const questaoAtual = questoesPartida[indiceEtapa];
+    const etapasRegistradasRef = useRef<Set<number>>(new Set());
+    const idsUsadosNaPartidaRef = useRef<Set<string>>(new Set());
+    const trocasNaEtapaRef = useRef<number>(0);
+    const saiuDaPaginaRef = useRef<boolean>(false);
+
+    const questaoBase = questoesPartida[indiceEtapa];
+    const questaoAtual = questaoSobrescrita && questaoSobrescrita.etapa === indiceEtapa ? questaoSobrescrita.questao : questaoBase;
     const etapaAtual = ROTEIRO_ETAPAS[indiceEtapa];
 
+    // Registra todas as questoes sorteadas da partida como ja utilizadas
     useEffect(() => {
-        etapasRegistradasRef.current = new Set();
+        questoesPartida.forEach((q) => idsUsadosNaPartidaRef.current.add(q.id));
     }, [questoesPartida]);
+
+    // Reseta o estado de foco ao mudar de etapa
+    useEffect(() => {
+        trocasNaEtapaRef.current = 0;
+        saiuDaPaginaRef.current = false;
+        setQuestaoSobrescrita(null);
+        if (indiceEtapa === 0 && !questaoRespondida) {
+            etapasRegistradasRef.current = new Set();
+            idsUsadosNaPartidaRef.current = new Set(questoesPartida.map((q) => q.id));
+        }
+    }, [indiceEtapa]);
 
     useEffect(() => {
         if (!modoDev || !questaoAtual || !etapaAtual) return;
@@ -423,6 +443,72 @@ export default function Questoes({ questoesPartida, indiceEtapa, estadoJogo, som
             onResponderEtapa(true, etapaAtual, questaoAtual);
         }
     }, [modoDev, indiceEtapa, questaoAtual, etapaAtual]);
+
+    const sortearQuestaoSimplesDisponivel = useCallback((blocoPreferencial: 1 | 2 | 3 | 4): Questao | null => {
+        const doMesmoBloco = BANCO_QUESTOES.filter((q) => q.bloco === blocoPreferencial && !idsUsadosNaPartidaRef.current.has(q.id));
+        const qualquerSimples = BANCO_QUESTOES.filter((q) => !idsUsadosNaPartidaRef.current.has(q.id));
+
+        const pool = doMesmoBloco.length > 0 ? doMesmoBloco : qualquerSimples;
+        if (pool.length === 0) return null;
+
+        return pool[Math.floor(Math.random() * pool.length)];
+    }, []);
+
+    const acionarTrocaPorPerdaDeFoco = useCallback(() => {
+        if (modoDev || questaoRespondida || !questaoAtual || saiuDaPaginaRef.current) return;
+        saiuDaPaginaRef.current = true;
+
+        let proximaQuestao: Questao | null = null;
+
+        // 1a troca: busca outra questao simples das que ja existem em BANCO_QUESTOES
+        if (trocasNaEtapaRef.current === 0) {
+            proximaQuestao = sortearQuestaoSimplesDisponivel(questaoAtual.bloco);
+        }
+
+        // Partindo dela (2a+ troca, ou se acabaram as simples): vai para Extras.tsx
+        if (!proximaQuestao) {
+            proximaQuestao = sortearQuestaoExtra(questaoAtual.bloco, idsUsadosNaPartidaRef.current);
+        }
+
+        trocasNaEtapaRef.current += 1;
+        idsUsadosNaPartidaRef.current.add(proximaQuestao.id);
+        setAlternativaSelecionada(null);
+        setQuestaoSobrescrita({ etapa: indiceEtapa, questao: proximaQuestao });
+        onSubstituirQuestao?.(indiceEtapa, proximaQuestao);
+    }, [indiceEtapa, modoDev, onSubstituirQuestao, questaoAtual, questaoRespondida, sortearQuestaoSimplesDisponivel]);
+
+    // Monitora troca de aba, minimizacao ou perda de foco silenciosamente
+    useEffect(() => {
+        if (modoDev || questaoRespondida) return;
+
+        function aoMudarVisibilidade() {
+            if (document.visibilityState === "hidden") {
+                acionarTrocaPorPerdaDeFoco();
+            } else if (document.visibilityState === "visible") {
+                saiuDaPaginaRef.current = false;
+            }
+        }
+
+        function aoPerderFocoJanela() {
+            acionarTrocaPorPerdaDeFoco();
+        }
+
+        function aoRetornarFocoJanela() {
+            if (document.visibilityState === "visible") {
+                saiuDaPaginaRef.current = false;
+            }
+        }
+
+        document.addEventListener("visibilitychange", aoMudarVisibilidade);
+        window.addEventListener("blur", aoPerderFocoJanela);
+        window.addEventListener("focus", aoRetornarFocoJanela);
+
+        return () => {
+            document.removeEventListener("visibilitychange", aoMudarVisibilidade);
+            window.removeEventListener("blur", aoPerderFocoJanela);
+            window.removeEventListener("focus", aoRetornarFocoJanela);
+        };
+    }, [acionarTrocaPorPerdaDeFoco, modoDev, questaoRespondida]);
 
     if (!questaoAtual || !etapaAtual) return null;
 
@@ -441,142 +527,161 @@ export default function Questoes({ questoesPartida, indiceEtapa, estadoJogo, som
     function lidarComProximoPasso() {
         setAlternativaSelecionada(null);
         setQuestaoRespondida(false);
+        setQuestaoSobrescrita(null);
         onAvancarEtapa();
     }
 
-    return (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 h-full min-h-0 items-stretch">
-            {/* COLUNA ESQUERDA (5 cols): Cenario 16-bits + Sprites + Dialogo NPC */}
-            <MolduraDnD className="lg:col-span-5 flex flex-col justify-between overflow-hidden">
-                <div className="relative flex-1 min-h-[150px] sm:min-h-[190px] w-full overflow-hidden border-b border-amber-500/35 bg-[#0c0a09]">
-                    <CenarioPixelArt tipo={etapaAtual.cenario} />
-                    <div className="absolute inset-0 bg-gradient-to-t from-[#16120e] via-transparent to-black/35" />
+    function bloquearCopiaCola(e: React.SyntheticEvent) {
+        if (!modoDev) {
+            e.preventDefault();
+        }
+    }
 
-                    <div className="absolute top-2.5 left-3 right-3 flex items-center justify-between gap-2">
-                        <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded bg-[#14100c]/90 text-amber-300 border border-amber-500/45">
+    return (
+        <div onCopy={bloquearCopiaCola} onCut={bloquearCopiaCola} onContextMenu={bloquearCopiaCola} className="flex flex-col gap-3 h-full min-h-0">
+            {/* FAIXA SUPERIOR: História & Diálogo do Capítulo em Destaque */}
+            <MolduraDnD className="px-4 py-2.5 sm:py-3 bg-gradient-to-r from-[#1d1711] via-[#19140f] to-[#1d1711] shrink-0">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/40">
                             <Compass className="w-3 h-3 text-amber-400" />
                             {etapaAtual.capitulo}
                         </span>
-                        <span className="text-[10px] font-extrabold px-2.5 py-0.5 rounded bg-[#14100c]/90 text-amber-200 border border-amber-500/45">Etapa {etapaAtual.etapa}/10</span>
+                        <span className="text-[11px] font-extrabold text-amber-200">Etapa {etapaAtual.etapa}/10</span>
+                        <span className="hidden sm:inline text-stone-500">•</span>
+                        <span className="font-dnd-title font-bold text-amber-300 text-xs sm:text-sm">{etapaAtual.npcNome}</span>
+                        <span className="hidden md:inline text-[11px] text-stone-400">({etapaAtual.npcCargo})</span>
                     </div>
 
-                    <div className="absolute bottom-2 left-3 right-3 flex items-end justify-between pointer-events-none">
-                        <div className="flex items-end gap-1">
-                            <HeroSprite equipamentos={estadoJogo.equipamentos} tamanho="mini" direcao="costas" />
-                            {(etapaAtual.cenario === "observatorio" || estadoJogo.reliquiasColetadas.length === 3) && <HypatiaSprite tamanho="mini" direcao={etapaAtual.cenario === "observatorio" ? "frente" : "costas"} />}
-                        </div>
-                        <div className="text-right bg-[#120e0b]/85 px-2.5 py-1 rounded border border-amber-500/30">
-                            <p className="font-dnd-title text-xs sm:text-sm font-black text-amber-100 leading-tight">{etapaAtual.local}</p>
-                        </div>
-                    </div>
+                    <span className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-0.5 rounded bg-amber-500/15 text-amber-200 border border-amber-500/40 font-semibold">
+                        <span>{etapaAtual.recompensa.icone}</span>
+                        <span>{etapaAtual.recompensa.nome}</span>
+                    </span>
                 </div>
 
-                <div className="p-3.5 sm:p-4 bg-[#19140f] space-y-2.5 shrink-0">
-                    <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                            <span className="w-8 h-8 rounded bg-amber-500/15 border border-amber-400/40 flex items-center justify-center text-lg">{etapaAtual.recompensa.icone}</span>
-                            <div>
-                                <p className="font-dnd-title font-bold text-amber-300 text-xs sm:text-sm leading-tight">{etapaAtual.npcNome}</p>
-                                <p className="text-[10px] text-stone-400">{etapaAtual.npcCargo}</p>
-                            </div>
-                        </div>
-                        <span className="text-[11px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-200 border border-amber-500/40 font-semibold">{etapaAtual.recompensa.nome}</span>
-                    </div>
-
-                    <p className="font-dnd-lore text-sm sm:text-base text-stone-200 leading-snug italic">“{etapaAtual.fala}”</p>
-                </div>
+                <p className="font-dnd-lore text-base sm:text-lg text-amber-50 leading-snug italic">“{etapaAtual.fala}”</p>
             </MolduraDnD>
 
-            {/* COLUNA DIREITA (7 cols): Enigma Matematico + 4 Botoes + Feedback */}
-            <MolduraDnD className="lg:col-span-7 p-4 sm:p-5 flex flex-col justify-between gap-3 overflow-y-auto">
-                <div className="space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded bg-purple-950/75 text-purple-200 border border-purple-500/40">
-                            <BookOpen className="w-3.5 h-3.5 text-purple-400" />
-                            {questaoAtual.tema}
-                        </span>
+            {/* GRADE PRINCIPAL INFERIOR: Cenario + Sprites (5 cols) & Enigma Matematico (7 cols) */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 flex-1 min-h-0 items-stretch">
+                {/* COLUNA ESQUERDA (5 cols): Cenario 16-bits + Sprites + Recompensa */}
+                <MolduraDnD className="lg:col-span-5 flex flex-col justify-between overflow-hidden">
+                    <div className="relative flex-1 min-h-[165px] sm:min-h-[210px] w-full overflow-hidden border-b border-amber-500/35 bg-[#0c0a09]">
+                        <CenarioPixelArt tipo={etapaAtual.cenario} />
+                        <div className="absolute inset-0 bg-gradient-to-t from-[#16120e] via-transparent to-black/30" />
 
-                        <div className="flex items-center gap-2">
-                            {modoDev && onPularParaArena && (
-                                <button type="button" onClick={onPularParaArena} className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-fuchsia-950/80 hover:bg-fuchsia-900 border border-fuchsia-400/50 text-fuchsia-200 inline-flex items-center gap-1 transition-colors cursor-pointer">
-                                    <Zap className="w-3.5 h-3.5 text-fuchsia-300" />
-                                    <span>Ir Direto para Arena (10/10)</span>
+                        <div className="absolute top-2.5 left-3 right-3 flex items-center justify-between gap-2">
+                            <span className="font-dnd-title text-xs sm:text-sm font-black px-2.5 py-1 rounded bg-[#14100c]/90 text-amber-100 border border-amber-500/40">📍 {etapaAtual.local}</span>
+                        </div>
+
+                        <div className="absolute bottom-2 left-3 right-3 flex items-end justify-between pointer-events-none">
+                            <div className="flex items-end gap-1.5">
+                                <HeroSprite equipamentos={estadoJogo.equipamentos} tamanho="mini" direcao="costas" />
+                                {(etapaAtual.cenario === "observatorio" || estadoJogo.reliquiasColetadas.length === 3) && <HypatiaSprite tamanho="mini" direcao={etapaAtual.cenario === "observatorio" ? "frente" : "costas"} />}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="p-3 bg-[#19140f] flex items-center gap-2.5 shrink-0">
+                        <span className="w-8 h-8 rounded bg-amber-500/15 border border-amber-400/40 flex items-center justify-center text-lg shrink-0">{etapaAtual.recompensa.icone}</span>
+                        <div className="min-w-0">
+                            <p className="font-dnd-title font-bold text-amber-300 text-xs leading-tight">Espólio: {etapaAtual.recompensa.nome}</p>
+                            <p className="text-[11px] text-stone-300 leading-snug">{etapaAtual.recompensa.descricao}</p>
+                        </div>
+                    </div>
+                </MolduraDnD>
+
+                {/* COLUNA DIREITA (7 cols): Enigma Matematico + 4 Botoes + Feedback */}
+                <MolduraDnD className="lg:col-span-7 p-4 sm:p-5 flex flex-col justify-between gap-3 overflow-y-auto">
+                    <div className="space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded bg-purple-950/75 text-purple-200 border border-purple-500/40">
+                                <BookOpen className="w-3.5 h-3.5 text-purple-400" />
+                                {questaoAtual.tema}
+                            </span>
+
+                            <div className="flex items-center gap-2">
+                                {modoDev && onPularParaArena && (
+                                    <button type="button" onClick={onPularParaArena} className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-fuchsia-950/80 hover:bg-fuchsia-900 border border-fuchsia-400/50 text-fuchsia-200 inline-flex items-center gap-1 transition-colors cursor-pointer">
+                                        <Zap className="w-3.5 h-3.5 text-fuchsia-300" />
+                                        <span>Ir Direto para Arena (10/10)</span>
+                                    </button>
+                                )}
+
+                                <button type="button" onClick={() => setMostrarRascunho(!mostrarRascunho)} className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-[#221b15] hover:bg-[#2d231b] border border-amber-600/35 text-amber-200 inline-flex items-center gap-1.5 transition-colors cursor-pointer">
+                                    <Calculator className="w-3.5 h-3.5 text-amber-400" />
+                                    {mostrarRascunho ? "Ocultar Fórmulas" : "Fórmulas PA/PG"}
                                 </button>
-                            )}
+                            </div>
+                        </div>
 
-                            <button type="button" onClick={() => setMostrarRascunho(!mostrarRascunho)} className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-[#221b15] hover:bg-[#2d231b] border border-amber-600/35 text-amber-200 inline-flex items-center gap-1.5 transition-colors cursor-pointer">
-                                <Calculator className="w-3.5 h-3.5 text-amber-400" />
-                                {mostrarRascunho ? "Ocultar Fórmulas" : "Fórmulas PA/PG"}
+                        {mostrarRascunho && (
+                            <div className="p-2.5 rounded-lg bg-[#0e0b09] border border-amber-500/30 space-y-2 text-[11px]">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-stone-300">
+                                    <div className="p-2 rounded bg-[#18130f] border border-amber-600/25">
+                                        <strong className="text-amber-300">PA:</strong> r = a₂ - a₁ | aₙ = a₁ + (n - 1)·r
+                                    </div>
+                                    <div className="p-2 rounded bg-[#18130f] border border-purple-500/25">
+                                        <strong className="text-purple-300">PG:</strong> q = a₂ ÷ a₁ | aₙ = a₁ · qⁿ⁻¹
+                                    </div>
+                                </div>
+                                <input type="text" value={textoRascunho} onChange={(e) => setTextoRascunho(e.target.value)} placeholder="Rascunho rápido de cálculo..." className="w-full px-2.5 py-1.5 rounded bg-[#16120e] border border-amber-600/30 text-stone-200 focus:outline-none focus:border-amber-400" />
+                            </div>
+                        )}
+
+                        <h3 className={`text-sm sm:text-base lg:text-lg font-bold text-amber-50 leading-snug ${!modoDev ? "select-none" : ""}`}>{questaoAtual.enunciado}</h3>
+
+                        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-2.5 ${!modoDev ? "select-none" : ""}`}>
+                            {questaoAtual.alternativas.map((alt, idx) => {
+                                const letras = ["A", "B", "C", "D"];
+                                const ehCorreta = idx === questaoAtual.correta;
+                                const ehSelecionada = idx === alternativaSelecionada;
+
+                                let estiloBotao = "bg-[#0f0c0a] hover:bg-[#1e1812] border-amber-600/30 text-stone-100";
+
+                                if (questaoRespondida) {
+                                    if (ehCorreta) {
+                                        estiloBotao = "bg-emerald-950/65 border-emerald-400 text-emerald-100 ring-2 ring-emerald-400/30";
+                                    } else if (ehSelecionada) {
+                                        estiloBotao = "bg-rose-950/65 border-rose-500 text-rose-200 ring-2 ring-rose-500/30";
+                                    } else {
+                                        estiloBotao = "bg-[#0c0908] border-stone-800 text-stone-500 opacity-60";
+                                    }
+                                }
+
+                                return (
+                                    <button key={idx} type="button" disabled={questaoRespondida} onClick={() => lidarComResposta(idx)} className={`w-full min-h-[48px] p-3 rounded-lg border-2 text-left font-semibold transition-all flex items-center gap-2.5 cursor-pointer active:scale-[0.99] ${estiloBotao}`}>
+                                        <span className="font-dnd-title w-7 h-7 rounded bg-[#1d1712] border border-amber-500/45 text-amber-300 flex items-center justify-center font-black text-xs shrink-0">{letras[idx]}</span>
+                                        <span className="text-xs sm:text-sm leading-snug">{alt}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {questaoRespondida ? (
+                        <div className={`p-3 rounded-lg border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${alternativaSelecionada === questaoAtual.correta ? "bg-emerald-950/50 border-emerald-500/50" : "bg-rose-950/50 border-rose-500/50"}`}>
+                            <div className="flex items-start gap-2">
+                                {alternativaSelecionada === questaoAtual.correta ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" /> : <XCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
+                                <div className="text-xs leading-snug">
+                                    <p className="font-extrabold text-amber-50">{alternativaSelecionada === questaoAtual.correta ? `${modoDev ? "[DEV] Marcada como certa! " : "Acertou! "}+${etapaAtual.recompensa.nome}` : "Resposta incorreta — sem espólio nesta etapa."}</p>
+                                    <p className="text-stone-300 mt-0.5">{questaoAtual.justificativa}</p>
+                                </div>
+                            </div>
+
+                            <button type="button" onClick={lidarComProximoPasso} className="shrink-0 px-4 py-2.5 rounded-lg bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-stone-950 font-dnd-title font-black text-xs sm:text-sm shadow transition-all flex items-center justify-center gap-1.5 cursor-pointer">
+                                <span>{indiceEtapa < 9 ? "Próxima Etapa" : "Ir para Arena"}</span>
+                                <ChevronRight className="w-4 h-4" />
                             </button>
                         </div>
-                    </div>
-
-                    {mostrarRascunho && (
-                        <div className="p-2.5 rounded-lg bg-[#0e0b09] border border-amber-500/30 space-y-2 text-[11px]">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-stone-300">
-                                <div className="p-2 rounded bg-[#18130f] border border-amber-600/25">
-                                    <strong className="text-amber-300">PA:</strong> r = a₂ - a₁ | aₙ = a₁ + (n - 1)·r
-                                </div>
-                                <div className="p-2 rounded bg-[#18130f] border border-purple-500/25">
-                                    <strong className="text-purple-300">PG:</strong> q = a₂ ÷ a₁ | aₙ = a₁ · qⁿ⁻¹
-                                </div>
-                            </div>
-                            <input type="text" value={textoRascunho} onChange={(e) => setTextoRascunho(e.target.value)} placeholder="Rascunho rápido de cálculo..." className="w-full px-2.5 py-1.5 rounded bg-[#16120e] border border-amber-600/30 text-stone-200 focus:outline-none focus:border-amber-400" />
+                    ) : (
+                        <div className="text-[11px] text-stone-400 border-t border-amber-600/15 pt-2 flex items-center justify-between">
+                            <span>Escolha uma das 4 runas acima para responder.</span>
+                            <span className="text-amber-300/80 font-semibold">{estadoJogo.jogador.nome}</span>
                         </div>
                     )}
-
-                    <h3 className="text-sm sm:text-base lg:text-lg font-bold text-amber-50 leading-snug">{questaoAtual.enunciado}</h3>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        {questaoAtual.alternativas.map((alt, idx) => {
-                            const letras = ["A", "B", "C", "D"];
-                            const ehCorreta = idx === questaoAtual.correta;
-                            const ehSelecionada = idx === alternativaSelecionada;
-
-                            let estiloBotao = "bg-[#0f0c0a] hover:bg-[#1e1812] border-amber-600/30 text-stone-100";
-
-                            if (questaoRespondida) {
-                                if (ehCorreta) {
-                                    estiloBotao = "bg-emerald-950/65 border-emerald-400 text-emerald-100 ring-2 ring-emerald-400/30";
-                                } else if (ehSelecionada) {
-                                    estiloBotao = "bg-rose-950/65 border-rose-500 text-rose-200 ring-2 ring-rose-500/30";
-                                } else {
-                                    estiloBotao = "bg-[#0c0908] border-stone-800 text-stone-500 opacity-60";
-                                }
-                            }
-
-                            return (
-                                <button key={idx} type="button" disabled={questaoRespondida} onClick={() => lidarComResposta(idx)} className={`w-full min-h-[48px] p-3 rounded-lg border-2 text-left font-semibold transition-all flex items-center gap-2.5 cursor-pointer active:scale-[0.99] ${estiloBotao}`}>
-                                    <span className="font-dnd-title w-7 h-7 rounded bg-[#1d1712] border border-amber-500/45 text-amber-300 flex items-center justify-center font-black text-xs shrink-0">{letras[idx]}</span>
-                                    <span className="text-xs sm:text-sm leading-snug">{alt}</span>
-                                </button>
-                            );
-                        })}
-                    </div>
-                </div>
-
-                {questaoRespondida ? (
-                    <div className={`p-3 rounded-lg border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${alternativaSelecionada === questaoAtual.correta ? "bg-emerald-950/50 border-emerald-500/50" : "bg-rose-950/50 border-rose-500/50"}`}>
-                        <div className="flex items-start gap-2">
-                            {alternativaSelecionada === questaoAtual.correta ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" /> : <XCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
-                            <div className="text-xs leading-snug">
-                                <p className="font-extrabold text-amber-50">{alternativaSelecionada === questaoAtual.correta ? `${modoDev ? "[DEV] Marcada como certa! " : "Acertou! "}+${etapaAtual.recompensa.nome}` : "Resposta incorreta — sem espólio nesta etapa."}</p>
-                                <p className="text-stone-300 mt-0.5">{questaoAtual.justificativa}</p>
-                            </div>
-                        </div>
-
-                        <button type="button" onClick={lidarComProximoPasso} className="shrink-0 px-4 py-2.5 rounded-lg bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-stone-950 font-dnd-title font-black text-xs sm:text-sm shadow transition-all flex items-center justify-center gap-1.5 cursor-pointer">
-                            <span>{indiceEtapa < 9 ? "Próxima Etapa" : "Ir para Arena"}</span>
-                            <ChevronRight className="w-4 h-4" />
-                        </button>
-                    </div>
-                ) : (
-                    <div className="text-[11px] text-stone-400 border-t border-amber-600/15 pt-2 flex items-center justify-between">
-                        <span>Escolha uma das 4 runas acima para responder.</span>
-                        <span className="text-amber-300/80 font-semibold">{estadoJogo.jogador.nome}</span>
-                    </div>
-                )}
-            </MolduraDnD>
+                </MolduraDnD>
+            </div>
         </div>
     );
 }
